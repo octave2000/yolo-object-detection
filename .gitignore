@@ -1,0 +1,5 @@
+.venv
+evidence
+__pycache__
+yolo26x.pt
+yolov8n.pt

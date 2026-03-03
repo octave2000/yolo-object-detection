@@ -1,0 +1,35 @@
+{
+  "model_path": "yolo26x.pt",
+  "output_dir": "evidence",
+  "confidence": 0.35,
+  "iou": 0.45,
+  "device": null,
+  "reconnect_delay_seconds": 5,
+  "save_cooldown_seconds": 1,
+  "inference_workers": 2,
+  "per_camera_min_detection_interval_ms": 1000,
+  "detection_max_width": 640,
+  "detection_max_height": 360,
+  "control_host": "0.0.0.0",
+  "control_port": 8080,
+  "pull_interval_seconds": 300,
+  "live_timeout_seconds": 600,
+  "pull_warmup_frames": 1,
+  "electronic_classes": [
+    "cell phone",
+    "laptop",
+    "bench",
+    "tv",
+    "remote",
+    "keyboard",
+    "mouse"
+  ],
+  "weapon_classes": ["knife"],
+  "streams": [
+    {
+      "name": "camera-1",
+      "url": "rtsp://root:toor@10.110.1.153:9000/h264.sdp",
+      "enabled": true
+    }
+  ]
+}

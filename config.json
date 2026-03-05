@@ -1,8 +1,8 @@
 {
   "model_path": "yolo26x.pt",
   "output_dir": "evidence",
-  "confidence": 0.35,
-  "iou": 0.45,
+  "confidence": 0.6,
+  "iou": 0.5,
   "device": null,
   "reconnect_delay_seconds": 5,
   "save_cooldown_seconds": 1,
@@ -18,17 +18,35 @@
   "electronic_classes": [
     "cell phone",
     "laptop",
-    "bench",
-    "tv",
     "remote",
     "keyboard",
-    "mouse"
+    "mouse",
+    "bench"
   ],
   "weapon_classes": ["knife"],
   "streams": [
     {
+      "room": "room-1",
       "name": "camera-1",
-      "url": "rtsp://root:toor@10.110.1.153:9000/h264.sdp",
+      "url": "rtsp://root:toor@154.65.106.118:8554/camera1",
+      "enabled": true
+    },
+    {
+      "room": "room-1",
+      "name": "camera-2",
+      "url": "rtsp://root:toor@154.65.106.118:8554/camera2",
+      "enabled": true
+    },
+    {
+      "room": "room-2",
+      "name": "camera-3",
+      "url": "rtsp://root:toor@154.65.106.118:8554/camera3",
+      "enabled": true
+    },
+    {
+      "room": "room-2",
+      "name": "camera-4",
+      "url": "rtsp://root:toor@154.65.106.118:8554/camera4",
       "enabled": true
     }
   ]

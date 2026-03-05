@@ -30,7 +30,16 @@ DEFAULT_WEAPON_CLASSES = ["knife"]
 class StreamConfig:
     name: str
     url: str
+    room: str = "default-room"
     enabled: bool = True
+
+    @property
+    def key(self) -> str:
+        return f"{self.room}/{self.name}"
+
+    @property
+    def display_name(self) -> str:
+        return self.key
 
 
 @dataclass
@@ -349,7 +358,10 @@ class RtspCaptureWorker:
         self.initial_pull_delay_seconds = initial_pull_delay_seconds
         self._thread = threading.Thread(
             target=self._run,
-            name=f"capture-{self.state.stream.name}",
+            name=(
+                f"capture-{sanitize_path_component(self.state.stream.room)}-"
+                f"{sanitize_path_component(self.state.stream.name)}"
+            ),
             daemon=True,
         )
 
@@ -405,7 +417,7 @@ class RtspCaptureWorker:
 
             if not capture.isOpened():
                 print(
-                    f"[WARN] Could not open stream '{self.state.stream.name}' in live mode. "
+                    f"[WARN] Could not open stream '{self.state.stream.display_name}' in live mode. "
                     f"Retrying in {self.config.reconnect_delay_seconds}s."
                 )
                 capture.release()
@@ -413,7 +425,7 @@ class RtspCaptureWorker:
                     return
                 continue
 
-            print(f"[INFO] Live mode connected to stream '{self.state.stream.name}'.")
+            print(f"[INFO] Live mode connected to stream '{self.state.stream.display_name}'.")
 
             while not self.stop_event.is_set():
                 if self.mode_controller.get_status()["effective_mode"] != "live":
@@ -422,7 +434,7 @@ class RtspCaptureWorker:
 
                 ok, frame = capture.read()
                 if not ok or frame is None:
-                    print(f"[WARN] Lost live stream '{self.state.stream.name}'. Reconnecting.")
+                    print(f"[WARN] Lost live stream '{self.state.stream.display_name}'. Reconnecting.")
                     break
 
                 detection_frame = prepare_detection_frame(
@@ -432,7 +444,7 @@ class RtspCaptureWorker:
                 )
 
                 if self.state.store_frame(detection_frame, frame, min_interval_seconds):
-                    self.ready_queue.put(self.state.stream.name)
+                    self.ready_queue.put(self.state.stream.key)
 
             capture.release()
             if self._wait_with_mode_checks(self.config.reconnect_delay_seconds):
@@ -444,7 +456,7 @@ class RtspCaptureWorker:
 
         if not capture.isOpened():
             print(
-                f"[WARN] Could not open stream '{self.state.stream.name}' in pull mode. "
+                f"[WARN] Could not open stream '{self.state.stream.display_name}' in pull mode. "
                 f"Retrying later."
             )
             capture.release()
@@ -459,7 +471,7 @@ class RtspCaptureWorker:
         capture.release()
 
         if frame is None:
-            print(f"[WARN] Pull mode did not get a frame from '{self.state.stream.name}'.")
+            print(f"[WARN] Pull mode did not get a frame from '{self.state.stream.display_name}'.")
             return False
 
         detection_frame = prepare_detection_frame(
@@ -469,7 +481,7 @@ class RtspCaptureWorker:
         )
 
         if self.state.store_frame(detection_frame, frame, min_interval_seconds):
-            self.ready_queue.put(self.state.stream.name)
+            self.ready_queue.put(self.state.stream.key)
 
         return True
 
@@ -531,19 +543,19 @@ class InferenceWorker:
 
         while not self.stop_event.is_set():
             try:
-                camera_name = self.ready_queue.get(timeout=0.5)
+                stream_key = self.ready_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
 
             try:
-                state = self.states.get(camera_name)
+                state = self.states.get(stream_key)
                 if state is None:
                     continue
 
                 snapshot = state.snapshot()
                 if snapshot is None:
                     if state.finish_inference(-1, min_interval_seconds):
-                        self.ready_queue.put(camera_name)
+                        self.ready_queue.put(stream_key)
                     continue
 
                 detections = detect_objects(model, snapshot.detection_frame, self.target_class_ids, self.config)
@@ -556,7 +568,8 @@ class InferenceWorker:
                     )
                     image_path, text_path = save_evidence(
                         self.config.output_dir,
-                        camera_name,
+                        state.stream.room,
+                        state.stream.name,
                         snapshot.captured_at,
                         annotated,
                         detections,
@@ -564,17 +577,17 @@ class InferenceWorker:
                     labels = [detection.label for detection in detections]
                     state.mark_saved_now()
                     print(
-                        f"[DETECTED] worker={self.worker_id} stream={camera_name} "
+                        f"[DETECTED] worker={self.worker_id} stream={state.stream.display_name} "
                         f"labels={sorted(set(labels))} image={image_path} text={text_path}"
                     )
 
                 if state.finish_inference(snapshot.frame_id, min_interval_seconds):
-                    self.ready_queue.put(camera_name)
+                    self.ready_queue.put(stream_key)
             except Exception as exc:
-                print(f"[ERROR] Worker {self.worker_id} failed on stream '{camera_name}': {exc}")
-                state = self.states.get(camera_name)
+                print(f"[ERROR] Worker {self.worker_id} failed on stream '{stream_key}': {exc}")
+                state = self.states.get(stream_key)
                 if state is not None and state.finish_inference(-1, min_interval_seconds):
-                    self.ready_queue.put(camera_name)
+                    self.ready_queue.put(stream_key)
             finally:
                 self.ready_queue.task_done()
 
@@ -595,15 +608,21 @@ def load_config(path: Path) -> AppConfig:
 
     config_dir = path.resolve().parent
 
-    streams = [
-        StreamConfig(
-            name=stream["name"],
-            url=stream["url"],
-            enabled=stream.get("enabled", True),
-        )
-        for stream in raw.get("streams", [])
-        if stream.get("enabled", True)
-    ]
+    streams: List[StreamConfig] = []
+    seen_stream_keys = set()
+    for stream in raw.get("streams", []):
+        if not stream.get("enabled", True):
+            continue
+
+        room = str(stream.get("room", "default-room")).strip() or "default-room"
+        name = str(stream["name"]).strip()
+        url = str(stream["url"]).strip()
+        stream_config = StreamConfig(name=name, url=url, room=room, enabled=True)
+
+        if stream_config.key in seen_stream_keys:
+            raise ValueError(f"Duplicate enabled stream '{stream_config.key}' in configuration.")
+        seen_stream_keys.add(stream_config.key)
+        streams.append(stream_config)
 
     if not streams:
         raise ValueError("No enabled streams were found in the configuration.")
@@ -698,18 +717,21 @@ def ensure_output_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def sanitize_stream_name(stream_name: str) -> str:
-    return "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in stream_name)
+def sanitize_path_component(name: str) -> str:
+    sanitized = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in name)
+    return sanitized or "unnamed"
 
 
 def save_evidence(
     output_dir: Path,
+    room_name: str,
     stream_name: str,
     captured_at: datetime,
     annotated_frame,
     detections: List[DetectionRecord],
 ) -> Tuple[Path, Path]:
-    camera_dir = output_dir / sanitize_stream_name(stream_name)
+    room_dir = output_dir / sanitize_path_component(room_name)
+    camera_dir = room_dir / sanitize_path_component(stream_name)
     camera_dir.mkdir(parents=True, exist_ok=True)
 
     basename = str(int(captured_at.timestamp() * 1000))
@@ -860,7 +882,7 @@ def main() -> None:
     target_class_ids = resolve_target_class_ids(validation_model, config)
     del validation_model
 
-    states = {stream.name: CameraState(stream=stream) for stream in config.streams}
+    states = {stream.key: CameraState(stream=stream) for stream in config.streams}
     ready_queue: "queue.Queue[str]" = queue.Queue()
     stop_event = threading.Event()
     mode_controller = CaptureModeController(

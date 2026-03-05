@@ -1,4 +1,5 @@
 import argparse
+import html
 import json
 import mimetypes
 import queue
@@ -9,7 +10,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import cv2
 from ultralytics import YOLO
@@ -256,8 +257,8 @@ def build_control_handler(mode_controller: CaptureModeController, served_dir: Pa
                 self._send_json(200, mode_controller.get_status())
                 return
 
-            if parsed.path == "/files":
-                self._handle_files_request(parsed)
+            if parsed.path == "/files" or parsed.path.startswith("/files/"):
+                self._handle_files_request(parsed.path)
                 return
 
             self._send_json(404, {"error": "not found"})
@@ -328,75 +329,101 @@ def build_control_handler(mode_controller: CaptureModeController, served_dir: Pa
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
-        def _handle_files_request(self, parsed) -> None:
-            query = parse_qs(parsed.query, keep_blank_values=True)
-            requested_path = query.get("path", [""])[0]
-            target_path = self._resolve_requested_path(requested_path)
+        def _handle_files_request(self, request_path: str) -> None:
+            target_path = self._resolve_requested_path(request_path)
             if target_path is None:
-                self._send_json(400, {"error": "path must stay within served directory"})
+                self.send_error(403, "Access denied")
                 return
 
             if not target_path.exists():
-                self._send_json(404, {"error": "path not found"})
+                self.send_error(404, "Path not found")
                 return
 
             if target_path.is_dir():
-                entries: List[Dict[str, Any]] = []
-                for child in sorted(target_path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
-                    child_stat = child.stat()
-                    entry: Dict[str, Any] = {
-                        "name": child.name,
-                        "path": child.relative_to(served_root).as_posix(),
-                        "type": "directory" if child.is_dir() else "file",
-                        "modified_at": datetime.fromtimestamp(child_stat.st_mtime).isoformat(
-                            timespec="seconds"
-                        ),
-                    }
-                    if child.is_file():
-                        entry["size_bytes"] = child_stat.st_size
-                    entries.append(entry)
-
-                response_path = ""
-                if target_path != served_root:
-                    response_path = target_path.relative_to(served_root).as_posix()
-
-                self._send_json(
-                    200,
-                    {
-                        "type": "directory",
-                        "root": str(served_root),
-                        "path": response_path,
-                        "entries": entries,
-                    },
-                )
+                self._send_directory_listing(target_path)
                 return
 
-            download_flag = query.get("download", ["0"])[0].strip().lower()
-            as_attachment = download_flag in {"1", "true", "yes"}
-            self._send_file(target_path, as_attachment)
+            self._send_file(target_path)
 
-        def _resolve_requested_path(self, requested_path: str) -> Optional[Path]:
-            resolved = (served_root / requested_path).resolve()
+        def _resolve_requested_path(self, request_path: str) -> Optional[Path]:
+            relative_url_path = ""
+            if request_path == "/files":
+                relative_url_path = ""
+            elif request_path.startswith("/files/"):
+                relative_url_path = request_path[len("/files/") :]
+            else:
+                return None
+
+            resolved = (served_root / unquote(relative_url_path)).resolve()
             try:
                 resolved.relative_to(served_root)
             except ValueError:
                 return None
             return resolved
 
-        def _send_file(self, file_path: Path, as_attachment: bool) -> None:
+        def _send_directory_listing(self, dir_path: Path) -> None:
+            try:
+                children = sorted(dir_path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
+            except OSError as exc:
+                self.send_error(500, f"Failed to list directory: {exc}")
+                return
+
+            relative_dir = ""
+            if dir_path != served_root:
+                relative_dir = dir_path.relative_to(served_root).as_posix()
+
+            title_path = "/" if not relative_dir else f"/{relative_dir}"
+            links: List[str] = []
+
+            if dir_path != served_root:
+                parent = dir_path.parent
+                parent_rel = ""
+                if parent != served_root:
+                    parent_rel = parent.relative_to(served_root).as_posix()
+                parent_href = "/files/" + quote(parent_rel, safe="/")
+                links.append(f'<li><a href="{parent_href}">../</a></li>')
+
+            for child in children:
+                child_rel = child.relative_to(served_root).as_posix()
+                href = "/files/" + quote(child_rel, safe="/")
+                display_name = child.name
+                if child.is_dir():
+                    href += "/"
+                    display_name += "/"
+                links.append(f'<li><a href="{href}">{html.escape(display_name)}</a></li>')
+
+            body = (
+                "<!DOCTYPE html>\n"
+                "<html>\n"
+                "<head><meta charset=\"utf-8\"><title>Index of "
+                f"{html.escape(title_path)}"
+                "</title></head>\n"
+                "<body>\n"
+                f"<h1>Index of {html.escape(title_path)}</h1>\n"
+                "<ul>\n"
+                + "\n".join(links)
+                + "\n</ul>\n"
+                "</body>\n"
+                "</html>\n"
+            )
+            encoded = body.encode("utf-8")
+
+            self.send_response(200)
+            self._send_common_headers()
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def _send_file(self, file_path: Path) -> None:
             try:
                 file_size = file_path.stat().st_size
                 content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-                content_disposition = "attachment" if as_attachment else "inline"
-
                 self.send_response(200)
                 self._send_common_headers()
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(file_size))
-                self.send_header(
-                    "Content-Disposition",
-                    f'{content_disposition}; filename="{file_path.name}"',
-                )
+                self.send_header("Content-Disposition", f'inline; filename="{file_path.name}"')
                 self.end_headers()
 
                 with file_path.open("rb") as handle:
@@ -406,7 +433,7 @@ def build_control_handler(mode_controller: CaptureModeController, served_dir: Pa
                             break
                         self.wfile.write(chunk)
             except OSError as exc:
-                self._send_json(500, {"error": f"failed to read file: {exc}"})
+                self.send_error(500, f"Failed to read file: {exc}")
 
     return ControlHandler
 

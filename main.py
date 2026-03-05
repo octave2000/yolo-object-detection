@@ -23,6 +23,12 @@ DEFAULT_ELECTRONIC_CLASSES = [
     "remote",
     "keyboard",
     "mouse",
+    "microwave",
+    "oven",
+    "toaster",
+    "refrigerator",
+    "clock",
+    "hair drier",
 ]
 
 DEFAULT_WEAPON_CLASSES = ["knife"]

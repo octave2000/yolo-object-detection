@@ -11,7 +11,7 @@
   "detection_max_width": 1280,
   "detection_max_height": 720,
   "control_host": "0.0.0.0",
-  "control_port": 8080,
+  "control_port": 8111,
   "pull_interval_seconds": 300,
   "live_timeout_seconds": 600,
   "pull_warmup_frames": 1,

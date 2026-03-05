@@ -6,7 +6,7 @@
   "device": null,
   "reconnect_delay_seconds": 5,
   "save_cooldown_seconds": 1,
-  "inference_workers": 2,
+  "inference_workers": 4,
   "per_camera_min_detection_interval_ms": 1000,
   "detection_max_width": 1280,
   "detection_max_height": 720,

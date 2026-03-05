@@ -1,7 +1,7 @@
 {
   "model_path": "yolo26x.pt",
   "output_dir": "evidence",
-  "confidence": 0.35,
+  "confidence": 0.2,
   "iou": 0.45,
   "device": null,
   "reconnect_delay_seconds": 5,
@@ -18,7 +18,7 @@
   "class_confidence_overrides": {
     "laptop": 0.85
   },
-  "electronic_classes": ["cell phone", "laptop"],
+  "electronic_classes": ["cell phone", "laptop", "bench"],
   "weapon_classes": ["knife"],
   "streams": [
     {

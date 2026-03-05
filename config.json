@@ -18,7 +18,7 @@
   "class_confidence_overrides": {
     "laptop": 0.85
   },
-  "electronic_classes": ["cell phone", "laptop", "bench"],
+  "electronic_classes": ["cell phone", "laptop"],
   "weapon_classes": ["knife"],
   "streams": [
     {

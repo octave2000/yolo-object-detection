@@ -15,6 +15,9 @@
   "pull_interval_seconds": 300,
   "live_timeout_seconds": 600,
   "pull_warmup_frames": 1,
+  "class_confidence_overrides": {
+    "laptop": 0.85
+  },
   "electronic_classes": ["cell phone", "laptop"],
   "weapon_classes": ["knife"],
   "streams": [

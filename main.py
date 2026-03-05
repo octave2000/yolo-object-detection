@@ -68,6 +68,7 @@ class AppConfig:
     pull_interval_seconds: int
     live_timeout_seconds: int
     pull_warmup_frames: int
+    class_confidence_overrides: Dict[str, float]
     electronic_classes: List[str]
     weapon_classes: List[str]
     streams: List[StreamConfig]
@@ -773,6 +774,7 @@ def load_config(path: Path) -> AppConfig:
         pull_interval_seconds=max(1, int(raw.get("pull_interval_seconds", 300))),
         live_timeout_seconds=max(1, int(raw.get("live_timeout_seconds", 600))),
         pull_warmup_frames=max(1, int(raw.get("pull_warmup_frames", 1))),
+        class_confidence_overrides=parse_class_confidence_overrides(raw.get("class_confidence_overrides", {})),
         electronic_classes=list(raw.get("electronic_classes", DEFAULT_ELECTRONIC_CLASSES)),
         weapon_classes=list(raw.get("weapon_classes", DEFAULT_WEAPON_CLASSES)),
         streams=streams,
@@ -783,6 +785,25 @@ def optional_int(value) -> Optional[int]:
     if value is None:
         return None
     return int(value)
+
+
+def parse_class_confidence_overrides(value: Any) -> Dict[str, float]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("class_confidence_overrides must be an object mapping class names to confidence values.")
+
+    parsed: Dict[str, float] = {}
+    for key, raw_threshold in value.items():
+        class_name = str(key).strip().lower()
+        threshold = float(raw_threshold)
+        if threshold < 0.0 or threshold > 1.0:
+            raise ValueError(
+                f"class_confidence_overrides['{class_name}'] must be between 0.0 and 1.0 (got {threshold})."
+            )
+        parsed[class_name] = threshold
+
+    return parsed
 
 
 def parse_optional_positive_int(value: Any, field_name: str) -> Optional[int]:
@@ -836,6 +857,11 @@ def resolve_target_class_ids(model: YOLO, config: AppConfig) -> List[int]:
 
     resolved_names = [str(model_names[class_id]) for class_id in class_ids]
     print(f"[INFO] Watching for classes: {', '.join(resolved_names)}")
+    if config.class_confidence_overrides:
+        formatted = ", ".join(
+            f"{name}>={threshold:.2f}" for name, threshold in sorted(config.class_confidence_overrides.items())
+        )
+        print(f"[INFO] Class-specific confidence overrides: {formatted}")
     return class_ids
 
 
@@ -923,10 +949,14 @@ def detect_objects(
     for box in prediction.boxes:
         class_id = int(box.cls[0].item())
         confidence = float(box.conf[0].item())
+        label = str(prediction.names[class_id])
+        min_confidence = config.class_confidence_overrides.get(label.lower(), config.confidence)
+        if confidence < min_confidence:
+            continue
         x1, y1, x2, y2 = box.xyxy[0].tolist()
         detections.append(
             DetectionRecord(
-                label=str(prediction.names[class_id]),
+                label=label,
                 confidence=confidence,
                 xyxy=(float(x1), float(y1), float(x2), float(y2)),
             )

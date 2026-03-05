@@ -1,5 +1,6 @@
 import argparse
 import json
+import mimetypes
 import queue
 import threading
 import time
@@ -8,7 +9,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import cv2
 from ultralytics import YOLO
@@ -238,7 +239,9 @@ class CaptureModeController:
         }
 
 
-def build_control_handler(mode_controller: CaptureModeController):
+def build_control_handler(mode_controller: CaptureModeController, served_dir: Path):
+    served_root = served_dir.resolve()
+
     class ControlHandler(BaseHTTPRequestHandler):
         server_version = "RtspControl/1.0"
 
@@ -249,11 +252,15 @@ def build_control_handler(mode_controller: CaptureModeController):
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path not in {"/mode", "/status"}:
-                self._send_json(404, {"error": "not found"})
+            if parsed.path in {"/mode", "/status"}:
+                self._send_json(200, mode_controller.get_status())
                 return
 
-            self._send_json(200, mode_controller.get_status())
+            if parsed.path == "/files":
+                self._handle_files_request(parsed)
+                return
+
+            self._send_json(404, {"error": "not found"})
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
@@ -321,12 +328,98 @@ def build_control_handler(mode_controller: CaptureModeController):
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
+        def _handle_files_request(self, parsed) -> None:
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            requested_path = query.get("path", [""])[0]
+            target_path = self._resolve_requested_path(requested_path)
+            if target_path is None:
+                self._send_json(400, {"error": "path must stay within served directory"})
+                return
+
+            if not target_path.exists():
+                self._send_json(404, {"error": "path not found"})
+                return
+
+            if target_path.is_dir():
+                entries: List[Dict[str, Any]] = []
+                for child in sorted(target_path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+                    child_stat = child.stat()
+                    entry: Dict[str, Any] = {
+                        "name": child.name,
+                        "path": child.relative_to(served_root).as_posix(),
+                        "type": "directory" if child.is_dir() else "file",
+                        "modified_at": datetime.fromtimestamp(child_stat.st_mtime).isoformat(
+                            timespec="seconds"
+                        ),
+                    }
+                    if child.is_file():
+                        entry["size_bytes"] = child_stat.st_size
+                    entries.append(entry)
+
+                response_path = ""
+                if target_path != served_root:
+                    response_path = target_path.relative_to(served_root).as_posix()
+
+                self._send_json(
+                    200,
+                    {
+                        "type": "directory",
+                        "root": str(served_root),
+                        "path": response_path,
+                        "entries": entries,
+                    },
+                )
+                return
+
+            download_flag = query.get("download", ["0"])[0].strip().lower()
+            as_attachment = download_flag in {"1", "true", "yes"}
+            self._send_file(target_path, as_attachment)
+
+        def _resolve_requested_path(self, requested_path: str) -> Optional[Path]:
+            resolved = (served_root / requested_path).resolve()
+            try:
+                resolved.relative_to(served_root)
+            except ValueError:
+                return None
+            return resolved
+
+        def _send_file(self, file_path: Path, as_attachment: bool) -> None:
+            try:
+                file_size = file_path.stat().st_size
+                content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+                content_disposition = "attachment" if as_attachment else "inline"
+
+                self.send_response(200)
+                self._send_common_headers()
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(file_size))
+                self.send_header(
+                    "Content-Disposition",
+                    f'{content_disposition}; filename="{file_path.name}"',
+                )
+                self.end_headers()
+
+                with file_path.open("rb") as handle:
+                    while True:
+                        chunk = handle.read(64 * 1024)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            except OSError as exc:
+                self._send_json(500, {"error": f"failed to read file: {exc}"})
+
     return ControlHandler
 
 
 class ControlServer:
-    def __init__(self, host: str, port: int, mode_controller: CaptureModeController) -> None:
-        handler = build_control_handler(mode_controller)
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        mode_controller: CaptureModeController,
+        served_dir: Path,
+    ) -> None:
+        handler = build_control_handler(mode_controller, served_dir)
         self._server = ThreadingHTTPServer((host, port), handler)
         self._server.daemon_threads = True
         self._thread = threading.Thread(target=self._server.serve_forever, name="control-server", daemon=True)
@@ -889,7 +982,12 @@ def main() -> None:
         pull_interval_seconds=config.pull_interval_seconds,
         live_timeout_seconds=config.live_timeout_seconds,
     )
-    control_server = ControlServer(config.control_host, config.control_port, mode_controller)
+    control_server = ControlServer(
+        config.control_host,
+        config.control_port,
+        mode_controller,
+        served_dir=Path.cwd(),
+    )
 
     worker_count = min(config.inference_workers, len(states))
     stream_count = max(1, len(states))
@@ -918,6 +1016,10 @@ def main() -> None:
         f"[INFO] Starting {len(capture_workers)} capture workers and {worker_count} inference workers. "
         f"Default mode is pull every {config.pull_interval_seconds}s. "
         f"Control endpoint: http://{config.control_host}:{config.control_port}/mode"
+    )
+    print(
+        f"[INFO] File browser endpoint: http://{config.control_host}:{config.control_port}/files "
+        f"(served root: '{Path.cwd()}')."
     )
     print(
         f"[INFO] Live mode times out after {config.live_timeout_seconds}s without another live command. "
